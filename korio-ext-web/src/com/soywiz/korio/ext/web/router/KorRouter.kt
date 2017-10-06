@@ -25,6 +25,7 @@ import java.io.FileNotFoundException
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.net.URLDecoder
+import java.nio.charset.Charset
 import java.nio.file.InvalidPathException
 
 object RoutePriority {
@@ -40,6 +41,8 @@ annotation class Route(val method: Http.Methods, val path: String, val priority:
 annotation class Param(val name: String, val limit: Int = -1)
 annotation class Get(val name: String, val limit: Int = -1)
 annotation class Post(val name: String, val limit: Int = -1)
+annotation class RawBody
+annotation class JsonContent
 annotation class Header(val name: String, val limit: Int = -1)
 
 val HttpServer.Request.extraParams by Extra.Property<HashMap<String, String>> { LinkedHashMap() }
@@ -51,6 +54,8 @@ fun HttpServer.Request.pathParam(name: String): String? {
 fun HttpServer.Request.getParam(name: String): String? {
 	return this.getParams[name]?.first()
 }
+
+fun invalidOp(msg: String): Nothing = throw InvalidOperationException(msg)
 
 open class KorBaseRoute(val bpath: String, val priority: Int) {
 	val matchNames = arrayListOf<String>()
@@ -171,12 +176,14 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 
 		val bodyHandler = com.soywiz.korio.async.Promise.Deferred<Unit>()
 
+		var jsonParam: Any? = null
 		var postParams = mapOf<String, List<String>>()
 		var totalRequestSize = 0L
 		var bodyOverflow = false
 		val bodyContent = OptByteBuffer()
 		val response = Http.Response()
 		val request = Http.Request(rreq.uri, req.headers)
+		val bodyCharset = Charsets.UTF_8
 
 		req.handler {
 			totalRequestSize += it.size
@@ -189,9 +196,25 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 
 		req.endHandler {
 			try {
+				/*
 				if ("application/x-www-form-urlencoded" == contentType) {
 					if (!bodyOverflow) {
-						postParams = QueryString.decode(bodyContent.toString())
+						//postParams = QueryString.decode(bodyContent.toString())
+						postParams = QueryString.decode(bodyContent.toByteArray().toString(Charset.defaultCharset()))
+
+					}
+				}
+				*/
+				when (contentType) {
+					"application/x-www-form-urlencoded" -> {
+						if (!bodyOverflow) {
+							postParams = QueryString.decode(bodyContent.toByteArray().toString(bodyCharset))
+						}
+					}
+					"application/json" -> {
+						if (!bodyOverflow) {
+							jsonParam = Json.decode(bodyContent.toString(bodyCharset))
+						}
 					}
 				}
 			} finally {
@@ -214,6 +237,9 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 					val get = annotations.filterIsInstance<Get>().firstOrNull()
 					val post = annotations.filterIsInstance<Post>().firstOrNull()
 					val header = annotations.filterIsInstance<Header>().firstOrNull()
+					val rawBody = annotations.filterIsInstance<RawBody>().firstOrNull()
+					val jsonContent = annotations.filterIsInstance<JsonContent>().firstOrNull()
+
 					when {
 						param != null -> {
 							args += Dynamic.dynamicCast(rreq.pathParam(param.name), paramType)
@@ -226,6 +252,18 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 							mapArgs[post.name] = result ?: ""
 							args += Dynamic.dynamicCast(result, paramType)
 						}
+						rawBody != null -> {
+							when {
+								String::class.java.isAssignableFrom(paramType) -> args += bodyContent.toString(bodyCharset)
+								ByteArray::class.java.isAssignableFrom(paramType) -> args += bodyContent.toByteArray()
+								OptByteBuffer::class.java.isAssignableFrom(paramType) -> args += bodyContent
+								else -> invalidOp("Annoated with RawBody but argument is not a String a ByteArray or a ByteArrayBuilder")
+							}
+						}
+						jsonContent != null -> {
+							args += Dynamic.dynamicCast(jsonParam, paramType)
+						}
+
 						header != null -> {
 							args += Dynamic.dynamicCast(req.getHeader(header.name) ?: "", paramType)
 						}
@@ -284,7 +322,13 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 						finalResult.write { buffer.append(it) }
 						res.end(buffer.toString())
 					}
-					else -> {
+					is Http.HttpException -> {
+						// @TODO: add/replace headers
+						// @TODO: test this !
+						res.setStatus(finalResult.statusCode)
+						res.end(finalResult.statusText)
+					}
+						else -> {
 						res.replaceHeader("Content-Type", "application/json")
 						res.end(Json.encode(finalResult))
 					}

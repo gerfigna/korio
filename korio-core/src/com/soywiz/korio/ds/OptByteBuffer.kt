@@ -1,5 +1,7 @@
 package com.soywiz.korio.ds
 
+import java.nio.charset.Charset
+
 class OptByteBuffer {
 	var size: Int = 0; private set
 	val chunks = arrayListOf<ByteArray>()
@@ -39,5 +41,9 @@ class OptByteBuffer {
 			offset += chunk.size
 		}
 		return out
+	}
+
+	fun toString(charSet: Charset): String {
+		return toByteArray().toString(charSet)
 	}
 }
