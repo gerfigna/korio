@@ -7,3 +7,5 @@
 *.iml
 *.ipr
 *.iws
+korio-ext-db/korio-ext-db-elasticsearch/build
+korio-ext-db/korio-ext-db-elasticsearch/out

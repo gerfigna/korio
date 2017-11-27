@@ -40,6 +40,7 @@ annotation class Route(val method: Http.Methods, val path: String, val priority:
 annotation class Param(val name: String, val limit: Int = -1)
 annotation class Get(val name: String, val limit: Int = -1)
 annotation class Post(val name: String, val limit: Int = -1)
+annotation class JsonContent
 annotation class Header(val name: String, val limit: Int = -1)
 
 val HttpServer.Request.extraParams by Extra.Property<HashMap<String, String>> { LinkedHashMap() }
@@ -125,6 +126,7 @@ class KorRouter(val injector: AsyncInjector, val requestConfig: HttpServer.Reque
 				if (route != null) {
 					route.handle(req)
 				} else {
+					req.setStatus(404)
 					req.addHeader("Content-Type", "text/html")
 					req.end("Route not found for ${req.path}")
 				}
@@ -172,6 +174,7 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 		val bodyHandler = com.soywiz.korio.async.Promise.Deferred<Unit>()
 
 		var postParams = mapOf<String, List<String>>()
+		var jsonParam: Any? = null
 		var totalRequestSize = 0L
 		var bodyOverflow = false
 		val bodyContent = OptByteBuffer()
@@ -189,9 +192,16 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 
 		req.endHandler {
 			try {
-				if ("application/x-www-form-urlencoded" == contentType) {
-					if (!bodyOverflow) {
-						postParams = QueryString.decode(bodyContent.toString())
+				when (contentType) {
+					"application/x-www-form-urlencoded" -> {
+						if (!bodyOverflow) {
+							postParams = QueryString.decode(bodyContent.toString(Charsets.UTF_8))
+						}
+					}
+					"application/json" -> {
+						if (!bodyOverflow) {
+							jsonParam = Json.decode(bodyContent.toString(Charsets.UTF_8))
+						}
 					}
 				}
 			} finally {
@@ -214,6 +224,7 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 					val get = annotations.filterIsInstance<Get>().firstOrNull()
 					val post = annotations.filterIsInstance<Post>().firstOrNull()
 					val header = annotations.filterIsInstance<Header>().firstOrNull()
+					val jsonContent = annotations.filterIsInstance<JsonContent>().firstOrNull()
 					when {
 						param != null -> {
 							args += Dynamic.dynamicCast(rreq.pathParam(param.name), paramType)
@@ -225,6 +236,9 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 							val result = postParams[post.name]?.firstOrNull()
 							mapArgs[post.name] = result ?: ""
 							args += Dynamic.dynamicCast(result, paramType)
+						}
+						jsonContent != null -> {
+							args += Dynamic.dynamicCast(jsonParam, paramType)
 						}
 						header != null -> {
 							args += Dynamic.dynamicCast(req.getHeader(header.name) ?: "", paramType)
@@ -283,6 +297,12 @@ suspend private fun registerHttpRoute(router: KorRouter, instance: Any, method: 
 						val buffer = StringBuffer()
 						finalResult.write { buffer.append(it) }
 						res.end(buffer.toString())
+					}
+					is Http.HttpException -> {
+						// @TODO: add/replace headers
+						// @TODO: test this !
+						res.setStatus(finalResult.statusCode)
+						res.end(finalResult.statusText)
 					}
 					else -> {
 						res.replaceHeader("Content-Type", "application/json")
